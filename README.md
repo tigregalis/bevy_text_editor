@@ -33,3 +33,7 @@ TODO:
 - [ ] selections are a little bit broken (or is this just a feature?): multi-click changes the selection "mode"
 - [ ] shift/ctrl/alt/esc handling
 - [ ] the selection should be its own entity! (and there should be the possibility of multiple selections)
+- [ ] emit events for extension
+- [ ] build on top of new observers?
+- [ ] separate "hit" into its own system and resource instead of
+- [ ] text2deditor? does that make sense?

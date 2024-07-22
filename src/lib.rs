@@ -233,11 +233,10 @@ mod plugin {
         };
         click_history.add_entry(position);
 
-        let Ok((mut buf, mut state)) = buffer.get_mut(parent) else {
+        let Ok((mut buf, mut editor_state)) = buffer.get_mut(parent) else {
             return;
         };
-        let new_state = {
-            let mut editor = TempEditor::new(&mut buf.0, *state);
+        editor_state.resume(&mut buf).with_editor_mut(|editor| {
             let font_system = text_pipeline.font_system_mut();
             if click_history.clicked(3) {
                 info!("triple-click: {click_history:?}");
@@ -269,9 +268,7 @@ mod plugin {
             } else {
                 unreachable!("clicked but zero clicks?");
             }
-            editor.state()
-        };
-        *state = new_state;
+        });
     }
 
     pub fn listen_keyboard_input_events(
@@ -287,9 +284,8 @@ mod plugin {
                 continue;
             }
 
-            for (mut buf, mut text, mut state) in &mut buffer {
-                let new_state = {
-                    let mut editor = TempEditor::new(&mut buf.0, *state);
+            for (mut buf, mut text, mut editor_state) in &mut buffer {
+                editor_state.resume(&mut buf).with_editor_mut(|editor| {
                     let font_system = text_pipeline.font_system_mut();
                     // info!("Before: {:?}", editor.cursor());
                     match &event.logical_key {
@@ -304,15 +300,12 @@ mod plugin {
                         Key::Delete => editor.action(font_system, Action::Delete),
                         Key::Control => {
                             info!("TODO: Control");
-                            continue;
                         }
                         Key::Shift => {
                             info!("TODO: Shift");
-                            continue;
                         }
                         Key::Tab => {
                             info!("TODO: Tab");
-                            continue;
                         }
                         Key::ArrowDown => editor.action(font_system, Action::Motion(Motion::Down)),
                         Key::ArrowLeft => editor.action(font_system, Action::Motion(Motion::Left)),
@@ -326,11 +319,9 @@ mod plugin {
                             editor.action(font_system, Action::Motion(Motion::PageDown))
                         }
                         Key::PageUp => editor.action(font_system, Action::Motion(Motion::PageUp)),
-                        _ => continue,
+                        _ => {}
                     }
-                    // info!("After:  {:?}", editor.cursor());
-                    editor.state()
-                };
+                });
 
                 // rebuild the text from scratch
                 for line in &buf.lines {
@@ -392,8 +383,6 @@ mod plugin {
                         text.sections[0].value = String::new();
                     }
                 }
-
-                *state = new_state;
             }
         }
     }
@@ -553,7 +542,6 @@ mod plugin {
             if editor_state.selection == Selection::None {
                 continue;
             };
-
             let Some(camera_entity) = camera.map(TargetCamera::entity).or(default_ui_camera.get())
             else {
                 continue;
@@ -761,28 +749,6 @@ mod plugin {
         None
     }
 
-    #[derive(Deref, DerefMut)]
-    pub struct TempEditor<'buffer>(pub Editor<'buffer>);
-
-    impl<'buffer> TempEditor<'buffer> {
-        pub fn new(buffer: &'buffer mut Buffer, state: EditorState) -> Self {
-            let mut editor = Editor::new(buffer);
-            if let Some(cursor) = state.cursor {
-                editor.set_cursor(cursor);
-                editor.set_selection(state.selection);
-            }
-            Self(editor)
-        }
-
-        pub fn state(&self) -> EditorState {
-            EditorState {
-                cursor: Some(self.cursor()),
-                selection: self.selection(),
-                selection_bounds: self.selection_bounds(),
-            }
-        }
-    }
-
     #[derive(Component, Clone, Copy, Debug)]
     pub struct EditorState {
         pub cursor: Option<Cursor>,
@@ -797,6 +763,39 @@ mod plugin {
                 selection: Selection::None,
                 selection_bounds: None,
             }
+        }
+    }
+
+    impl EditorState {
+        fn resume<'es, 'buf>(&'es mut self, buffer: &'buf mut Buffer) -> TempEditor<'es, 'buf> {
+            TempEditor::new(self, buffer)
+        }
+    }
+
+    pub struct TempEditor<'es, 'buf> {
+        editor: Editor<'buf>,
+        editor_state: &'es mut EditorState,
+    }
+
+    impl<'es, 'buf> TempEditor<'es, 'buf> {
+        fn new(editor_state: &'es mut EditorState, buffer: &'buf mut Buffer) -> Self {
+            let mut editor = Editor::new(buffer);
+            if let Some(cursor) = editor_state.cursor {
+                editor.set_cursor(cursor);
+                editor.set_selection(editor_state.selection);
+            }
+            Self {
+                editor,
+                editor_state,
+            }
+        }
+
+        pub fn with_editor_mut(mut self, func: impl FnOnce(&mut Editor)) -> Self {
+            func(&mut self.editor);
+            self.editor_state.cursor = Some(self.editor.cursor());
+            self.editor_state.selection = self.editor.selection();
+            self.editor_state.selection_bounds = self.editor.selection_bounds();
+            self
         }
     }
 
