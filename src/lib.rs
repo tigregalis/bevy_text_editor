@@ -14,7 +14,7 @@ mod plugin {
     use bevy::prelude::*;
     use bevy::render::{Extract, ExtractSchedule, RenderApp};
     use bevy::text::cosmic_text::{
-        Action, Buffer, Cursor, Edit, Editor, LayoutRun, Motion, Selection,
+        Action, Attrs, AttrsList, Buffer, Cursor, Edit, Editor, LayoutRun, Motion, Selection,
     };
     use bevy::text::{BreakLineOn, CosmicBuffer, TextLayoutInfo};
     use bevy::ui::widget::TextFlags;
@@ -285,6 +285,37 @@ mod plugin {
             }
 
             for (mut buf, mut text, mut editor_state) in &mut buffer {
+                // temporary hack:
+                // see https://github.com/pop-os/cosmic-text/issues/290
+                // for new-lines (\n), sets the metadata of the line's default attrs to that new-line's span index
+
+                let mut line_no = 0;
+                let mut map_from_line_to_span_index = HashMap::new();
+                for (span_idx, span) in text.sections.iter().enumerate() {
+                    // find all newlines
+                    for c in span.value.chars() {
+                        if c == '\n' {
+                            map_from_line_to_span_index.insert(line_no, span_idx);
+                            line_no += 1;
+                        }
+                    }
+                }
+
+                for (line_no, line) in buf.lines.iter_mut().enumerate() {
+                    let attrs_list = line.attrs_list();
+                    let attrs = Attrs {
+                        metadata: map_from_line_to_span_index.get(&line_no).copied().unwrap(),
+                        ..Attrs::new()
+                    };
+                    let mut attrs_list_new = AttrsList::new(attrs);
+                    for (range, attrs) in attrs_list.spans() {
+                        attrs_list_new.add_span(range.clone(), attrs.as_attrs());
+                    }
+                    line.set_attrs_list(attrs_list_new);
+                }
+
+                // /temporary hack
+
                 editor_state.resume(&mut buf).with_editor_mut(|editor| {
                     let font_system = text_pipeline.font_system_mut();
                     // info!("Before: {:?}", editor.cursor());
@@ -323,12 +354,23 @@ mod plugin {
                     }
                 });
 
-                // rebuild the text from scratch
+                // rebuild the text from scratch (writeback)
+                // this still isn't quite right
+
+                // dbg!(buf.lines.len());
+                // dbg!(buf
+                //     .lines
+                //     .iter()
+                //     .map(|l| l.text().to_owned() + l.ending().as_str())
+                //     .collect::<String>());
+
+                let mut bevy_span_index = 0;
                 for line in &buf.lines {
-                    let line_text = line.text();
+                    let line_text = dbg!(line.text());
                     let len = line_text.len();
                     let ending = line.ending().as_str();
                     let spans = line.attrs_list().spans();
+                    let default_attrs = line.attrs_list().defaults();
                     // NOTE: cosmic-text allows for "unstyled" (default-styled) spans/ranges
                     //       this means not all `spans` actually have styles
                     //       so imagine a line with 21 characters (full range 0..21)
@@ -340,20 +382,27 @@ mod plugin {
                     //       16..17 like 17..19 (unstyled span will be styled like next styled span)
                     //       19..21 like 17..19 (final part of line, unstyled span will be styled like previous styled span)
                     let mut current_pos = 0;
-                    let mut bevy_span_index = 0;
-                    for (range, attrs) in spans.into_iter() {
-                        bevy_span_index = attrs.metadata;
-                        let s = scratch_spans_for_update.entry(bevy_span_index).or_default();
-                        // "unstyled" spans will take the following range's attrs
-                        if current_pos < range.start {
-                            s.push_str(&line_text[current_pos..range.start]);
-                        }
-                        // push the styled span
-                        s.push_str(&line_text[range.clone()]);
-                        current_pos = range.end;
-                        // push the line ending if we've reached the end of the line
-                        if current_pos == len {
-                            s.push_str(ending);
+                    if spans.is_empty() {
+                        let s = scratch_spans_for_update
+                            .entry(default_attrs.metadata) // from the hack above
+                            .or_default();
+                        // push the line ending
+                        s.push_str(ending);
+                    } else {
+                        for (range, attrs) in spans.into_iter() {
+                            bevy_span_index = attrs.metadata;
+                            let s = scratch_spans_for_update.entry(bevy_span_index).or_default();
+                            // "unstyled" spans will take the following range's attrs
+                            if current_pos < range.start {
+                                s.push_str(&line_text[current_pos..range.start]);
+                            }
+                            // push the styled span
+                            s.push_str(&line_text[range.clone()]);
+                            current_pos = range.end;
+                            // push the line ending if we've reached the end of the line
+                            if current_pos == len {
+                                s.push_str(ending);
+                            }
                         }
                     }
                     // final part of the line
@@ -366,23 +415,39 @@ mod plugin {
                     }
                 }
 
-                // apply the changes (well, everything) to the text component
-                for i in 0..text.sections.len() {
-                    match scratch_spans_for_update.remove(&i) {
-                        // TODO: should be forwarded to the TextSpan component for child spans instead
-                        // TODO: could be more efficient (don't update the whole string if no changes were made)
-                        Some(s) => text.sections[i].value = s,
-                        None => scratch_spans_for_deletion.push(i),
-                    }
-                }
-                scratch_spans_for_deletion.reverse();
-                for i in scratch_spans_for_deletion.drain(..) {
-                    if text.sections.len() > 1 {
-                        text.sections.remove(i);
-                    } else {
-                        text.sections[0].value = String::new();
-                    }
-                }
+                dbg!(&scratch_spans_for_update);
+
+                // it may just be easier and less error-prone to reconstruct the entire text component
+
+                *text = Text::from_sections({
+                    let mut spans: Vec<(usize, TextSection)> = scratch_spans_for_update
+                        .drain()
+                        .map(|(i, s)| (i, TextSection::new(s, text.sections[i].style.clone())))
+                        .collect();
+                    spans.sort_by_key(|(i, _)| *i);
+                    spans.into_iter().map(|(_, s)| s).collect::<Vec<_>>()
+                });
+
+                dbg!(text);
+
+                // // apply the changes (well, everything) to the text component
+                // for i in 0..text.sections.len() {
+                //     match scratch_spans_for_update.remove(&i) {
+                //         // TODO: should be forwarded to the TextSpan component for child spans instead
+                //         // TODO: could be more efficient (don't update the whole string if no changes were made)
+                //         Some(s) => text.sections[i].value = s,
+                //         None => scratch_spans_for_deletion.push(i),
+                //     }
+                // }
+                // scratch_spans_for_deletion.reverse();
+                // for i in scratch_spans_for_deletion.drain(..) {
+                //     if text.sections.len() > 1 {
+                //         text.sections.remove(i);
+                //     } else {
+                //         text.sections[0].value = String::new();
+                //     }
+                //     // text.sections[i].value = " ".to_string();
+                // }
             }
         }
     }

@@ -37,3 +37,5 @@ TODO:
 - [ ] build on top of new observers?
 - [ ] separate "hit" into its own system and resource instead of
 - [ ] text2deditor? does that make sense?
+- [x] in editor example, crashes when you delete all of the 3rd line, then backspace again
+- [x] doesn't preserve attrs information for empty lines (these just randomly disappear)
